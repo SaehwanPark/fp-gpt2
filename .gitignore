@@ -38,5 +38,6 @@ logs/
 merged_codes.md
 merged_codes*.md
 
-# Diff patches
+# temporary files
 *.patch
+temp*.*

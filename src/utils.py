@@ -93,8 +93,15 @@ def _extract_layer_norm(hf_ln: dict) -> LayerNormParams:
 
 
 def _extract_dense(hf_dense: dict) -> DenseParams:
-  """extract dense layer parameters."""
-  return DenseParams(kernel=hf_dense["kernel"], bias=hf_dense["bias"])
+  """extract dense layer parameters.
+
+  important: hugging face stores kernels as (out_features, in_features)
+  but flax expects (in_features, out_features), so we transpose.
+  """
+  return DenseParams(
+    kernel=hf_dense["kernel"].T,  # transpose for flax convention
+    bias=hf_dense["bias"],
+  )
 
 
 def _extract_block(hf_block: dict) -> BlockParams:
@@ -127,6 +134,10 @@ def map_hf_params(
 
   note: flax creates block_0, block_1, etc. as top-level keys, not
   nested under a "blocks" container. this matches the model structure.
+
+  important: hugging face stores dense layer kernels as (out, in) while
+  flax expects (in, out). we transpose during mapping to convert between
+  conventions. this is done once at load time, not during forward passes.
 
   raises:
     KeyError: if expected keys are missing from hf_params

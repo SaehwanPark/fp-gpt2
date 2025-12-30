@@ -115,27 +115,32 @@ def generate_text_greedy(
 ) -> str:
   """greedy decode up to ``max_length`` tokens (including prompt).
 
-  uses jax.lax.while_loop for functional unfold pattern:
-  repeatedly applies next_token until stopping condition.
+  uses python loop for simplicity since sequence length varies.
+  forward pass is jit-compiled for efficiency.
   """
-  initial_ids = jnp.array(tokenizer.encode(prompt), dtype=jnp.int32)
+  input_ids = list(tokenizer.encode(prompt))
 
-  def cond_fn(state):
-    """continue if length < max and last token is not eos."""
-    ids, _ = state
-    return (len(ids) < max_length) & (ids[-1] != tokenizer.eos_token_id)
+  # jit-compile the forward pass once
+  @jax.jit
+  def get_next_token_logits(ids_array: jnp.ndarray) -> jnp.ndarray:
+    """compute logits for next token given current sequence."""
+    logits = model.apply({"params": params}, ids_array, deterministic=True)
+    return logits[0, -1]  # last position logits
 
-  def body_fn(state):
-    """generate next token and append to sequence."""
-    ids, _ = state
-    arr = ids[None, :]  # add batch dimension
-    logits = model.apply({"params": params}, arr, deterministic=True)
-    next_token_logits = logits[0, len(ids) - 1]
-    next_token_id = jnp.argmax(next_token_logits)
-    return jnp.append(ids, next_token_id), None
+  # generate tokens one at a time
+  while len(input_ids) < max_length:
+    # prepare input: (1, seq_len)
+    ids_array = jnp.array([input_ids], dtype=jnp.int32)
+    next_token_logits = get_next_token_logits(ids_array)
+    # convert to int outside jit boundary
+    next_token = int(jnp.argmax(next_token_logits))
+    input_ids.append(next_token)
 
-  final_ids, _ = jax.lax.while_loop(cond_fn, body_fn, (initial_ids, None))
-  return tokenizer.decode(final_ids.tolist())
+    # stop if eos token
+    if next_token == tokenizer.eos_token_id:
+      break
+
+  return tokenizer.decode(input_ids)
 
 
 def generate_text_sampling(
@@ -151,30 +156,34 @@ def generate_text_sampling(
 ) -> str:
   """sample tokens with temperature, top-k, or nucleus sampling.
 
-  functional generation loop using jax.lax.while_loop with rng threading.
+  uses python loop with jit-compiled sampling function for efficiency.
   """
-  initial_ids = jnp.array(tokenizer.encode(prompt), dtype=jnp.int32)
+  input_ids = list(tokenizer.encode(prompt))
 
-  def cond_fn(state):
-    """continue if length < max and last token is not eos."""
-    ids, _, _ = state
-    return (len(ids) < max_length) & (ids[-1] != tokenizer.eos_token_id)
+  # jit-compile the sampling logic
+  @jax.jit
+  def get_next_token_logits(ids_array: jnp.ndarray) -> jnp.ndarray:
+    """get logits for next token given current sequence."""
+    logits = model.apply({"params": params}, ids_array, deterministic=True)
+    return logits[0, -1]  # last position logits
 
-  def body_fn(state):
-    """sample next token and append to sequence."""
-    ids, rng, step = state
-    arr = ids[None, :]
-    logits = model.apply({"params": params}, arr, deterministic=True)
-    next_token_logits = logits[0, len(ids) - 1]
-
+  # generate tokens with rng threading
+  for step in range(max_length - len(input_ids)):
     # split rng for this step
     rng, step_rng = jax.random.split(rng)
-    next_token_id = sample_token(next_token_logits, step_rng, temperature, top_k, top_p)
 
-    return jnp.append(ids, next_token_id), rng, step + 1
+    # prepare input
+    ids_array = jnp.array([input_ids], dtype=jnp.int32)
+    next_token_logits = get_next_token_logits(ids_array)
+    # sample outside jit boundary
+    next_token = sample_token(next_token_logits, step_rng, temperature, top_k, top_p)
+    input_ids.append(next_token)
 
-  final_ids, _, _ = jax.lax.while_loop(cond_fn, body_fn, (initial_ids, rng, 0))
-  return tokenizer.decode(final_ids.tolist())
+    # stop if eos token
+    if next_token == tokenizer.eos_token_id:
+      break
+
+  return tokenizer.decode(input_ids)
 
 
 def main() -> None:

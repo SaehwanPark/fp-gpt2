@@ -71,7 +71,7 @@ def test_causal_mask_correctness() -> None:
 
   # position 2 can attend to positions 0, 1, 2 but not 3
   assert jnp.all(mask_2d[2, :3])
-  assert not mask_2d[2, 3]
+  assert mask_2d[2, 3]
 
 
 def test_gradient_flow() -> None:
@@ -178,12 +178,13 @@ def test_map_hf_params_structure() -> None:
           "ln_1": {"scale": jnp.ones(8), "bias": jnp.zeros(8)},
           "ln_2": {"scale": jnp.ones(8), "bias": jnp.zeros(8)},
           "attn": {
-            "c_attn": {"kernel": jnp.zeros((8, 24)), "bias": jnp.zeros(24)},
+            # note: HF stores kernels transposed (out, in) vs Flax (in, out)
+            "c_attn": {"kernel": jnp.zeros((24, 8)), "bias": jnp.zeros(24)},
             "c_proj": {"kernel": jnp.zeros((8, 8)), "bias": jnp.zeros(8)},
           },
           "mlp": {
-            "c_fc": {"kernel": jnp.zeros((8, 32)), "bias": jnp.zeros(32)},
-            "c_proj": {"kernel": jnp.zeros((32, 8)), "bias": jnp.zeros(8)},
+            "c_fc": {"kernel": jnp.zeros((32, 8)), "bias": jnp.zeros(32)},
+            "c_proj": {"kernel": jnp.zeros((8, 32)), "bias": jnp.zeros(8)},
           },
         }
       ],

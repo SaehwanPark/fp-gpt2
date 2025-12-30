@@ -1,0 +1,17 @@
+[project]
+name = "fp-gpt2"
+version = "0.1.0"
+description = "FP-style GPT2 Implementation in Jax/Flax"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "flax>=0.12.2",
+    "jax>=0.8.2",
+    "optax>=0.2.6",
+    "pytest>=9.0.2",
+    "python-dotenv>=1.2.1",
+    "transformers>=4.57.3",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }

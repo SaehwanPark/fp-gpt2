@@ -80,8 +80,8 @@ Generate text from a prompt using pretrained or fine-tuned weights:
 
 ```bash
 uv run -m src.inference \
-  --prompt "Hello, I recently traveled to my favorite city in France, " \
-  --max-length 50
+  --prompt "Hello, I'm Einstgein, " \
+  --max-length 20
 ```
 
 To load a fine-tuned checkpoint:

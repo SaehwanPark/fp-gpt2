@@ -37,3 +37,6 @@ logs/
 # Merged codes in markdown
 merged_codes.md
 merged_codes*.md
+
+# Diff patches
+*.patch

@@ -80,7 +80,7 @@ Generate text from a prompt using pretrained or fine-tuned weights:
 
 ```bash
 uv run -m src.inference \
-  --prompt "Hello, I'm Einstgein, " \
+  --prompt "Hello, I'm Einstein, " \
   --max-length 20
 ```
 

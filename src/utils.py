@@ -1,104 +1,165 @@
-"""Utilities for datasets, tokenization, and HF→Flax param mapping."""
+"""utilities for datasets, tokenization, and hf→flax param mapping."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List
+from typing import TypedDict
+
+import jax.numpy as jnp
 
 logger = logging.getLogger(__name__)
 
 
-def load_dataset(data_dir: Path, filename: str) -> List[str]:
-  """Load non-empty lines from a text file in ``data_dir``."""
+# precise types for parameter structure
+class LayerNormParams(TypedDict):
+  scale: jnp.ndarray
+  bias: jnp.ndarray
+
+
+class DenseParams(TypedDict):
+  kernel: jnp.ndarray
+  bias: jnp.ndarray
+
+
+class AttentionParams(TypedDict):
+  c_attn: DenseParams  # qkv projection
+  c_proj: DenseParams  # output projection
+
+
+class MLPParams(TypedDict):
+  c_fc: DenseParams  # feedforward expand
+  c_proj: DenseParams  # feedforward contract
+
+
+class BlockParams(TypedDict):
+  ln_1: LayerNormParams
+  ln_2: LayerNormParams
+  attn: AttentionParams
+  mlp: MLPParams
+
+
+# note: full model params structure is dynamic based on n_layer
+# top level keys: wte, wpe, block_0, block_1, ..., block_{n-1}, ln_f
+# each block_i contains BlockParams structure
+
+
+def load_dataset(data_dir: Path, filename: str) -> list[str]:
+  """load non-empty lines from a text file in ``data_dir``.
+
+  pure function: given same inputs, returns same output.
+  file i/o is the only side effect.
+  """
   file_path = data_dir / filename
   if not file_path.is_file():
-    raise FileNotFoundError(f"Dataset file not found: {file_path}")
-  lines: List[str] = []
+    raise FileNotFoundError(f"dataset file not found: {file_path}")
+
   with file_path.open("r", encoding="utf-8") as f:
-    for line in f:
-      line = line.strip()
-      if line:
-        lines.append(line)
-  logger.info("Loaded %d non‑empty lines from %s", len(lines), file_path)
+    lines = [line.strip() for line in f if line.strip()]
+
+  logger.info("loaded %d non-empty lines from %s", len(lines), file_path)
   return lines
 
 
 def prepare_tokenizer(model_name: str = "gpt2"):
-  """Load a Hugging Face tokenizer and set pad_token to eos_token."""
+  """load a hugging face tokenizer and set pad_token to eos_token.
+
+  side effect: downloads tokenizer if not cached.
+  """
   from transformers import AutoTokenizer  # type: ignore
 
-  logger.info("Loading tokenizer for model %s", model_name)
+  logger.info("loading tokenizer for model %s", model_name)
   tokenizer = AutoTokenizer.from_pretrained(model_name)
-  # Ensure the tokenizer does not add special tokens by default.
   tokenizer.pad_token = tokenizer.eos_token
   return tokenizer
+
+
+# pure extraction functions for parameter mapping
+def _extract_embeddings(hf_params: dict, prefix: str) -> dict[str, dict]:
+  """extract word and position embeddings.
+
+  note: nn.Embed creates {"embedding": array} structure, not flat arrays.
+  we preserve this structure for compatibility with flax.
+  """
+  return {
+    "wte": {"embedding": hf_params[prefix]["wte"]["embedding"]},
+    "wpe": {"embedding": hf_params[prefix]["wpe"]["embedding"]},
+  }
+
+
+def _extract_layer_norm(hf_ln: dict) -> LayerNormParams:
+  """extract layer norm parameters."""
+  return LayerNormParams(scale=hf_ln["scale"], bias=hf_ln["bias"])
+
+
+def _extract_dense(hf_dense: dict) -> DenseParams:
+  """extract dense layer parameters.
+
+  important: hugging face stores kernels as (out_features, in_features)
+  but flax expects (in_features, out_features), so we transpose.
+  """
+  return DenseParams(
+    kernel=hf_dense["kernel"].T,  # transpose for flax convention
+    bias=hf_dense["bias"],
+  )
+
+
+def _extract_block(hf_block: dict) -> BlockParams:
+  """extract single transformer block parameters.
+
+  preserves openai's weight layout: c_attn contains concatenated qkv.
+  """
+  return BlockParams(
+    ln_1=_extract_layer_norm(hf_block["ln_1"]),
+    ln_2=_extract_layer_norm(hf_block["ln_2"]),
+    attn=AttentionParams(
+      c_attn=_extract_dense(hf_block["attn"]["c_attn"]),
+      c_proj=_extract_dense(hf_block["attn"]["c_proj"]),
+    ),
+    mlp=MLPParams(
+      c_fc=_extract_dense(hf_block["mlp"]["c_fc"]),
+      c_proj=_extract_dense(hf_block["mlp"]["c_proj"]),
+    ),
+  )
 
 
 def map_hf_params(
   hf_params: dict, config, *, hf_key_prefix: str = "transformer"
 ) -> dict:
-  """Convert HF Flax GPT-2 param dict into this model’s param tree."""
-  params_out: dict = {}
+  """convert hf flax gpt-2 param dict into this model's param tree.
 
-  # Word token embeddings and positional embeddings
+  functional pipeline: compose pure extraction functions to build
+  the target parameter structure. each extraction function handles
+  one level of the hierarchy.
+
+  note: flax creates block_0, block_1, etc. as top-level keys, not
+  nested under a "blocks" container. this matches the model structure.
+
+  important: hugging face stores dense layer kernels as (out, in) while
+  flax expects (in, out). we transpose during mapping to convert between
+  conventions. this is done once at load time, not during forward passes.
+
+  raises:
+    KeyError: if expected keys are missing from hf_params
+  """
   try:
-    wte = hf_params[hf_key_prefix]["wte"]["embedding"]
-    wpe = hf_params[hf_key_prefix]["wpe"]["embedding"]
+    hf_blocks = hf_params[hf_key_prefix]["h"]
+
+    # extract blocks as top-level keys (not nested in container)
+    blocks_dict = {
+      f"block_{idx}": _extract_block(
+        hf_blocks[str(idx)] if isinstance(hf_blocks, dict) else hf_blocks[idx]
+      )
+      for idx in range(config.n_layer)
+    }
+
+    # compose into final structure
+    return {
+      **_extract_embeddings(hf_params, hf_key_prefix),
+      **blocks_dict,  # blocks are at top level, not nested
+      "ln_f": _extract_layer_norm(hf_params[hf_key_prefix]["ln_f"]),
+    }
   except KeyError as exc:
     raise KeyError(
-      f"Expected wte/wpe in Hugging Face parameters under '{hf_key_prefix}'"
+      f"expected transformer structure in hf parameters under '{hf_key_prefix}'"
     ) from exc
-  params_out["wte"] = wte
-  params_out["wpe"] = wpe
-
-  # Blocks
-  hf_blocks = hf_params[hf_key_prefix]["h"]
-  blocks_out = {}
-  for idx in range(config.n_layer):
-    hf_block = hf_blocks[str(idx)] if isinstance(hf_blocks, dict) else hf_blocks[idx]
-    block_out: dict = {}
-    # Layer norms
-    block_out["ln_1"] = {
-      "scale": hf_block["ln_1"]["scale"],
-      "bias": hf_block["ln_1"]["bias"],
-    }
-    block_out["ln_2"] = {
-      "scale": hf_block["ln_2"]["scale"],
-      "bias": hf_block["ln_2"]["bias"],
-    }
-    # Attention projections
-    attn = hf_block["attn"]
-    block_out["attn"] = {
-      "c_attn": {
-        "kernel": attn["c_attn"]["kernel"],
-        "bias": attn["c_attn"]["bias"],
-      },
-      "c_proj": {
-        "kernel": attn["c_proj"]["kernel"],
-        "bias": attn["c_proj"]["bias"],
-      },
-    }
-    # MLP projections
-    mlp = hf_block["mlp"]
-    block_out["mlp"] = {
-      "c_fc": {
-        "kernel": mlp["c_fc"]["kernel"],
-        "bias": mlp["c_fc"]["bias"],
-      },
-      "c_proj": {
-        "kernel": mlp["c_proj"]["kernel"],
-        "bias": mlp["c_proj"]["bias"],
-      },
-    }
-    blocks_out[f"block_{idx}"] = block_out
-
-  params_out["blocks"] = blocks_out
-  # Final layer norm
-  ln_f = hf_params[hf_key_prefix]["ln_f"]
-  params_out["ln_f"] = {
-    "scale": ln_f["scale"],
-    "bias": ln_f["bias"],
-  }
-
-  return params_out

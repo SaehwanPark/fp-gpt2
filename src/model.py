@@ -1,10 +1,9 @@
-"""GPT-2 architecture in Flax (attention, blocks, LM head)."""
+"""gpt-2 architecture in flax (attention, blocks, lm head)."""
 
 from __future__ import annotations
 
 from typing import Optional
 
-import jax
 import jax.numpy as jnp
 from flax import linen as nn
 
@@ -12,7 +11,13 @@ from .config import ModelConfig
 
 
 def gelu(x: jnp.ndarray) -> jnp.ndarray:
-  """GELU activation (GPT-2 approximation)."""
+  """gelu activation (gpt-2 approximation).
+
+  uses the tanh approximation from the original gelu paper:
+  https://arxiv.org/abs/1606.08415
+
+  gelu(x) ≈ 0.5x(1 + tanh[√(2/π)(x + 0.044715x³)])
+  """
   return (
     0.5
     * x
@@ -20,8 +25,25 @@ def gelu(x: jnp.ndarray) -> jnp.ndarray:
   )
 
 
+def create_causal_mask(seq_len: int) -> jnp.ndarray:
+  """precompute causal attention mask: (1, 1, seq, seq).
+
+  lower triangular matrix where mask[i, j] = (i >= j), ensuring
+  position i can only attend to positions 0..i (not future tokens).
+
+  shape is (1, 1, seq, seq) for broadcasting over (batch, heads, seq, seq).
+  """
+  return jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))[None, None, :, :]
+
+
 class CausalSelfAttention(nn.Module):
-  """Multi-head causal self-attention."""
+  """multi-head causal self-attention.
+
+  implements scaled dot-product attention with causal masking:
+  attention(q, k, v) = softmax(qk^t / √d_k) v
+
+  preserves openai's weight layout: single projection for q,k,v.
+  """
 
   config: ModelConfig
   dtype: jnp.dtype = jnp.float32
@@ -30,94 +52,110 @@ class CausalSelfAttention(nn.Module):
   def __call__(
     self, x: jnp.ndarray, mask: Optional[jnp.ndarray], deterministic: bool = True
   ) -> jnp.ndarray:
-    """Apply attention.
+    """apply causal self-attention.
 
-    Args:
-      x: (batch, seq, n_embd)
-      mask: (1, 1, seq, seq) where True allows attention
-      deterministic: disables dropout when True
+    args:
+      x: (batch, seq, n_embd) input embeddings
+      mask: (1, 1, seq, seq) where true allows attention
+      deterministic: disables dropout when true
+
+    returns:
+      (batch, seq, n_embd) contextualized representations
     """
     cfg = self.config
     bsz, seq_len, _ = x.shape
 
-    # Compute queries, keys and values in a single projection to
-    # preserve the weight layout used by OpenAI.  The projection
-    # outputs a tensor of shape (batch, seq_len, 3 * n_embd).
+    # compute q, k, v in a single projection to preserve openai's layout.
+    # outputs (batch, seq, 3 * n_embd) which splits into [q, k, v].
+    # each of q, k, v has shape (batch, seq, n_embd).
     proj = nn.Dense(
       features=3 * cfg.n_embd, use_bias=True, dtype=self.dtype, name="c_attn"
     )
     qkv = proj(x)
-    # Split along the last dimension into q, k, v.  Each has shape
-    # (batch, seq_len, n_embd).
     q, k, v = jnp.split(qkv, 3, axis=-1)
 
-    # Reshape for multi‑head attention: (batch, heads, seq_len, head_dim).
+    # reshape for multi-head attention: (batch, n_head, seq, head_dim).
+    # this enables parallel computation across attention heads.
     head_dim = cfg.head_dim
     q = q.reshape(bsz, seq_len, cfg.n_head, head_dim).transpose(0, 2, 1, 3)
     k = k.reshape(bsz, seq_len, cfg.n_head, head_dim).transpose(0, 2, 1, 3)
     v = v.reshape(bsz, seq_len, cfg.n_head, head_dim).transpose(0, 2, 1, 3)
 
-    # Scale queries to prevent large logits.
-    scale = 1.0 / jnp.sqrt(head_dim)
-    q = q * scale
+    # scaled dot-product attention: (batch, heads, seq, seq)
+    # scaling by 1/√d_k prevents dot products from growing too large
+    attn_scores = (q @ k.transpose(0, 1, 3, 2)) / jnp.sqrt(head_dim)
 
-    # Compute dot‑products between queries and keys.  The resulting
-    # tensor has shape (batch, heads, seq_len, seq_len).
-    attn_weights = jnp.einsum("bhqd,bhkd->bhqk", q, k)
-
-    # Apply the causal mask by setting disallowed positions to a
-    # large negative value.  This relies on the mask being a boolean
-    # array where ``True`` indicates that the attention weight is
-    # permitted.
+    # apply causal mask: set future positions to -inf before softmax
     if mask is not None:
-      # Broadcast mask to match the attention weight shape.  The
-      # incoming mask is assumed to have dimensions
-      # (1, 1, seq_len, seq_len).
-      attn_weights = jnp.where(mask, attn_weights, -1e10)
+      # broadcast mask from (1, 1, seq, seq) to (batch, heads, seq, seq)
+      attn_scores = jnp.where(mask, attn_scores, -1e10)
 
-    # Normalize the attention weights.
-    attn_probs = jax.nn.softmax(attn_weights, axis=-1)
-    attn_probs = nn.Dropout(rate=cfg.attn_pdrop)(
-      attn_probs, deterministic=deterministic
+    # normalize attention weights and apply dropout
+    attn_weights = nn.softmax(attn_scores, axis=-1)
+    attn_weights = nn.Dropout(rate=cfg.attn_pdrop, deterministic=deterministic)(
+      attn_weights
     )
 
-    # Compute the weighted values.
-    attn_output = jnp.einsum("bhqk,bhkd->bhqd", attn_probs, v)
-    # Reshape back to (batch, seq_len, n_embd).
+    # weighted sum of values: (batch, heads, seq, head_dim)
+    attn_output = attn_weights @ v
+
+    # merge heads: (batch, seq, n_embd)
     attn_output = attn_output.transpose(0, 2, 1, 3).reshape(bsz, seq_len, cfg.n_embd)
 
-    # Final linear projection and dropout.
+    # output projection
     out_proj = nn.Dense(
       features=cfg.n_embd, use_bias=True, dtype=self.dtype, name="c_proj"
     )
     output = out_proj(attn_output)
-    output = nn.Dropout(rate=cfg.resid_pdrop)(output, deterministic=deterministic)
+    output = nn.Dropout(rate=cfg.resid_pdrop, deterministic=deterministic)(output)
 
     return output
 
 
 class MLP(nn.Module):
-  """Two-layer feed-forward network used in each block."""
+  """position-wise feedforward network.
+
+  two-layer network with gelu activation: ffn(x) = gelu(xw1)w2
+  expands to n_inner (default 4 * n_embd), then contracts back.
+  """
 
   config: ModelConfig
   dtype: jnp.dtype = jnp.float32
 
   @nn.compact
   def __call__(self, x: jnp.ndarray, deterministic: bool = True) -> jnp.ndarray:
-    cfg = self.config
-    inner_dim = cfg.n_inner if cfg.n_inner is not None else 4 * cfg.n_embd
-    fc = nn.Dense(features=inner_dim, dtype=self.dtype, name="c_fc")
-    proj = nn.Dense(features=cfg.n_embd, dtype=self.dtype, name="c_proj")
+    """apply position-wise feedforward.
 
-    x = fc(x)
-    x = gelu(x)
-    x = proj(x)
-    x = nn.Dropout(rate=cfg.resid_pdrop)(x, deterministic=deterministic)
-    return x
+    args:
+      x: (batch, seq, n_embd)
+      deterministic: disables dropout when true
+
+    returns:
+      (batch, seq, n_embd)
+    """
+    cfg = self.config
+    # expand: (batch, seq, n_embd) -> (batch, seq, n_inner)
+    expand = nn.Dense(
+      features=cfg.ffn_dim, use_bias=True, dtype=self.dtype, name="c_fc"
+    )
+    hidden = gelu(expand(x))
+
+    # contract: (batch, seq, n_inner) -> (batch, seq, n_embd)
+    contract = nn.Dense(
+      features=cfg.n_embd, use_bias=True, dtype=self.dtype, name="c_proj"
+    )
+    output = contract(hidden)
+    output = nn.Dropout(rate=cfg.resid_pdrop, deterministic=deterministic)(output)
+
+    return output
 
 
 class GPT2Block(nn.Module):
-  """Transformer block: LN → attn → residual → LN → MLP → residual."""
+  """single transformer block: layernorm -> attention -> layernorm -> mlp.
+
+  uses pre-normalization (layernorm before attention/mlp) as in gpt-2.
+  residual connections allow gradient flow through deep networks.
+  """
 
   config: ModelConfig
   dtype: jnp.dtype = jnp.float32
@@ -126,91 +164,92 @@ class GPT2Block(nn.Module):
   def __call__(
     self, x: jnp.ndarray, mask: Optional[jnp.ndarray], deterministic: bool = True
   ) -> jnp.ndarray:
+    """apply transformer block.
+
+    args:
+      x: (batch, seq, n_embd)
+      mask: (1, 1, seq, seq) causal attention mask
+      deterministic: disables dropout when true
+
+    returns:
+      (batch, seq, n_embd)
+    """
     cfg = self.config
+
+    # attention sub-layer with residual connection
     ln1 = nn.LayerNorm(epsilon=cfg.layer_norm_epsilon, dtype=self.dtype, name="ln_1")
+    attn = CausalSelfAttention(config=cfg, dtype=self.dtype, name="attn")
+    x = x + attn(ln1(x), mask, deterministic=deterministic)
+
+    # mlp sub-layer with residual connection
     ln2 = nn.LayerNorm(epsilon=cfg.layer_norm_epsilon, dtype=self.dtype, name="ln_2")
-
-    # Attention block
-    attn_out = CausalSelfAttention(cfg, dtype=self.dtype, name="attn")(
-      ln1(x), mask, deterministic
-    )
-    x = x + attn_out
-
-    # Feed‑forward block
-    mlp_out = MLP(cfg, dtype=self.dtype, name="mlp")(ln2(x), deterministic)
-    x = x + mlp_out
+    mlp = MLP(config=cfg, dtype=self.dtype, name="mlp")
+    x = x + mlp(ln2(x), deterministic=deterministic)
 
     return x
 
 
 class GPT2LMHeadModel(nn.Module):
-  """GPT-2 language model with tied input/output embeddings."""
+  """gpt-2 language model: embeddings + blocks + lm head.
+
+  architecture:
+    1. token + position embeddings
+    2. n_layer transformer blocks
+    3. final layer norm
+    4. project to vocabulary (tied with token embeddings)
+  """
 
   config: ModelConfig
   dtype: jnp.dtype = jnp.float32
 
-  def setup(self) -> None:
-    # Create a learnable token embedding table.  The same table
-    # will be used for the output projection to tie the input and
-    # output representations.  The variable is registered under
-    # ``params`` so that it will be saved/loaded with checkpoints.
-    self.wte = self.param(
-      "wte",
-      jax.nn.initializers.normal(stddev=0.02),
-      (self.config.vocab_size, self.config.n_embd),
-    )
-    # Positional embeddings are learned as well.  A single
-    # parameter stores all positions; indexing is handled in the
-    # forward pass.
-    self.wpe = self.param(
-      "wpe",
-      jax.nn.initializers.normal(stddev=0.02),
-      (self.config.n_positions, self.config.n_embd),
-    )
-    # Instantiate the sequence of blocks.  Each block has its own
-    # scope/name so that parameters do not collide.
-    self.blocks = [
-      GPT2Block(config=self.config, dtype=self.dtype, name=f"block_{i}")
-      for i in range(self.config.n_layer)
-    ]
-    # Final layer normalisation.
-    self.ln_f = nn.LayerNorm(
-      epsilon=self.config.layer_norm_epsilon, dtype=self.dtype, name="ln_f"
-    )
-
-    # Define dropout modules.  Dropout layers are submodules and must be
-    # created in ``setup`` rather than in the ``__call__`` method.  This
-    # avoids the ``AssignSubModuleError`` raised by Flax when submodules
-    # are instantiated outside of ``setup`` or a ``@compact`` function.
-    # ``embd_pdrop`` controls dropout applied immediately after adding
-    # positional embeddings.  Additional dropout modules in attention
-    # and MLP layers are created within those modules.
-    self.embd_dropout = nn.Dropout(rate=self.config.embd_pdrop)
-
+  @nn.compact
   def __call__(self, input_ids: jnp.ndarray, deterministic: bool = True) -> jnp.ndarray:
-    """Compute logits over the vocabulary for each input position."""
-    batch_size, seq_len = input_ids.shape
-    # Lookup token and position embeddings.  Positional indices are
-    # computed on the fly.
-    token_embeds = jnp.take(self.wte, input_ids, axis=0)
-    positions = jnp.arange(seq_len)[None, :]
-    pos_embeds = jnp.take(self.wpe, positions, axis=0)
-    x = token_embeds + pos_embeds
-    # Dropout on embeddings.  Use the dropout module defined in setup.
-    x = self.embd_dropout(x, deterministic=deterministic)
-    # Prepare the causal mask once per sequence length.  The mask
-    # shape is (1, 1, seq_len, seq_len) so that broadcasting over
-    # batch and heads works correctly.
-    # True values indicate positions that are allowed to attend.
-    causal_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
-    causal_mask = causal_mask[None, None, :, :]
+    """forward pass producing next-token logits.
 
-    # Iterate over blocks.  We pass the same mask to all blocks.
-    for block in self.blocks:
-      x = block(x, mask=causal_mask, deterministic=deterministic)
+    args:
+      input_ids: (batch, seq) token indices
+      deterministic: disables dropout when true
 
-    x = self.ln_f(x)
-    # Compute logits via weight tying.  We reshape wte to (n_embd,
-    # vocab_size) for the matrix multiplication.
-    logits = jnp.einsum("bld,vd->blv", x, self.wte)
+    returns:
+      (batch, seq, vocab_size) logits for next token prediction
+    """
+    cfg = self.config
+    bsz, seq_len = input_ids.shape
+
+    # embeddings: token + position
+    wte = nn.Embed(
+      num_embeddings=cfg.vocab_size,
+      features=cfg.n_embd,
+      dtype=self.dtype,
+      name="wte",
+    )
+    wpe = nn.Embed(
+      num_embeddings=cfg.n_positions,
+      features=cfg.n_embd,
+      dtype=self.dtype,
+      name="wpe",
+    )
+
+    token_emb = wte(input_ids)
+    pos_ids = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
+    pos_emb = wpe(pos_ids)
+
+    x = token_emb + pos_emb
+    x = nn.Dropout(rate=cfg.embd_pdrop, deterministic=deterministic)(x)
+
+    # precompute causal mask once for all blocks
+    mask = create_causal_mask(seq_len)
+
+    # apply transformer blocks sequentially
+    for i in range(cfg.n_layer):
+      block = GPT2Block(config=cfg, dtype=self.dtype, name=f"block_{i}")
+      x = block(x, mask, deterministic=deterministic)
+
+    # final layer norm
+    ln_f = nn.LayerNorm(epsilon=cfg.layer_norm_epsilon, dtype=self.dtype, name="ln_f")
+    x = ln_f(x)
+
+    # project to vocabulary (weight tying with token embeddings)
+    logits = x @ wte.embedding.T
+
     return logits

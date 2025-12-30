@@ -1,9 +1,4 @@
-"""Unit tests for the GPT‑2 Flax implementation.
-
-These tests verify that the shapes of the tensors flowing through
-individual components match expectations and that helper functions
-behave sensibly.  They can be run with ``pytest``.
-"""
+"""Shape and utility tests for the GPT-2 Flax implementation."""
 
 import jax
 import jax.numpy as jnp

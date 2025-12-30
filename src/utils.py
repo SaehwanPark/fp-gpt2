@@ -1,12 +1,4 @@
-"""Utility functions for dataset handling, tokenization and parameter mapping.
-
-This module collects helper routines used throughout the project.
-Functions defined here avoid external side effects and are intended to
-be easily testable.  The helpers cover three broad areas: loading
-text datasets from disk, preparing Hugging Face tokenizers, and
-converting pre‑trained Hugging Face parameters into the layout
-expected by the custom Flax model defined in :mod:`src.model`.
-"""
+"""Utilities for datasets, tokenization, and HF→Flax param mapping."""
 
 from __future__ import annotations
 
@@ -18,25 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 def load_dataset(data_dir: Path, filename: str) -> List[str]:
-  """Load a text dataset from the given directory.
-
-  Each line of the file will be returned as a separate string.  Empty
-  lines are skipped.  The caller is responsible for ensuring that
-  ``data_dir`` exists and that the filename is valid.
-
-  Parameters
-  ----------
-  data_dir:
-      Base directory from which to load the file.  Typically this
-      comes from the ``DATA_DIR`` environment variable.
-  filename:
-      Name of the file within ``data_dir`` to open.
-
-  Returns
-  -------
-  list of str
-      A list of non‑empty lines from the file.
-  """
+  """Load non-empty lines from a text file in ``data_dir``."""
   file_path = data_dir / filename
   if not file_path.is_file():
     raise FileNotFoundError(f"Dataset file not found: {file_path}")
@@ -51,23 +25,7 @@ def load_dataset(data_dir: Path, filename: str) -> List[str]:
 
 
 def prepare_tokenizer(model_name: str = "gpt2"):
-  """Load a Hugging Face tokenizer for the given model name.
-
-  The returned tokenizer is configured to return tensors as Python
-  ``int`` arrays.  Tokenizers require an active internet connection
-  for the first call; subsequent calls will use the cached files.
-
-  Parameters
-  ----------
-  model_name:
-      Name of the pre‑trained model whose tokenizer should be
-      instantiated.  The default is ``'gpt2'``.
-
-  Returns
-  -------
-  transformers.PreTrainedTokenizer
-      A tokenizer instance ready for encoding and decoding text.
-  """
+  """Load a Hugging Face tokenizer and set pad_token to eos_token."""
   from transformers import AutoTokenizer  # type: ignore
 
   logger.info("Loading tokenizer for model %s", model_name)
@@ -80,44 +38,7 @@ def prepare_tokenizer(model_name: str = "gpt2"):
 def map_hf_params(
   hf_params: dict, config, *, hf_key_prefix: str = "transformer"
 ) -> dict:
-  """Map Hugging Face GPT‑2 parameters to the custom Flax model layout.
-
-  Hugging Face uses a nested dictionary of parameters for its Flax
-  implementation of GPT‑2.  This function extracts the relevant
-  weights and biases and places them into a structure matching the
-  parameter tree of :class:`~src.model.GPT2LMHeadModel`.  Only
-  parameters that exist in both models are copied; other entries are
-  ignored.
-
-  Parameters
-  ----------
-  hf_params:
-      The parameter dictionary from a Hugging Face
-      ``FlaxGPT2LMHeadModel``.  It must have the same structure as
-      returned by ``model.params``.
-  config:
-      Configuration of the custom model used to determine the number
-      of layers and shapes.
-  hf_key_prefix:
-      Root key under which transformer parameters live in ``hf_params``.
-      The default is ``'transformer'``, which is how Hugging Face
-      namespaces the GPT‑2 transformer stack.
-
-  Returns
-  -------
-  dict
-      A parameter dictionary structured like the ``params`` portion
-      of the custom Flax model.  Keys that do not correspond to a
-      parameter in the custom model are omitted.
-
-  Notes
-  -----
-  The mapping here assumes that the Hugging Face parameter names
-  conform to the conventions used in version 4.x of the
-  transformers library.  Future versions may require updates.  The
-  mapping is implemented explicitly to avoid dependence on private
-  APIs.
-  """
+  """Convert HF Flax GPT-2 param dict into this model’s param tree."""
   params_out: dict = {}
 
   # Word token embeddings and positional embeddings

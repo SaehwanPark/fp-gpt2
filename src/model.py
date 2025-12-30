@@ -1,34 +1,4 @@
-"""Neural network modules implementing the GPT‑2 architecture.
-
-This module contains a set of Flax modules that together make up a
-GPT‑2 language model.  The design mirrors the original implementation
-from OpenAI and the reference code found in the Hugging Face
-transformers library, but it is written to facilitate readability and
-modular reuse.  Each subcomponent is encapsulated in its own class
-and exposed through a well‑typed interface.
-
-The core components are:
-
-* :class:`CausalSelfAttention` – implements multi‑head masked
-  self‑attention.  Query, key and value projections are computed via
-  a single dense layer to match the OpenAI weight layout, and an
-  output projection follows the attention weighting.
-* :class:`MLP` – a simple feed‑forward network consisting of two
-  linear layers with a GELU activation in between.  Dropout is
-  applied to the output.
-* :class:`GPT2Block` – combines layer normalisation, causal
-  self‑attention and the MLP into a residual block.
-* :class:`GPT2LMHeadModel` – the full language model including token
-  and positional embeddings, a stack of transformer blocks and a
-  tied language modelling head.  The forward pass returns logits for
-  each token in the vocabulary.
-
-Functions and classes in this module avoid PyTorch style side
-effects by favouring explicit argument passing and pure functions.  At
-the top level the model can be used either for fine‑tuning or
-inference.  Dropout behaviour is controlled via the ``deterministic``
-flag passed to the ``__call__`` methods.
-"""
+"""GPT-2 architecture in Flax (attention, blocks, LM head)."""
 
 from __future__ import annotations
 
@@ -42,23 +12,7 @@ from .config import ModelConfig
 
 
 def gelu(x: jnp.ndarray) -> jnp.ndarray:
-  """Approximate the Gaussian error linear unit (GELU) activation.
-
-  The GELU activation is defined as ``x * Phi(x)`` where ``Phi`` is the
-  CDF of the standard normal distribution.  The approximation used
-  here is that originally proposed by Hendrycks and Gimpel and
-  subsequently adopted by OpenAI in GPT‑2.
-
-  Parameters
-  ----------
-  x:
-      The input tensor.
-
-  Returns
-  -------
-  jax.numpy.ndarray
-      The activated tensor of the same shape as ``x``.
-  """
+  """GELU activation (GPT-2 approximation)."""
   return (
     0.5
     * x
@@ -67,23 +21,7 @@ def gelu(x: jnp.ndarray) -> jnp.ndarray:
 
 
 class CausalSelfAttention(nn.Module):
-  """Multi‑head causal (masked) self‑attention for GPT‑2.
-
-  This module implements the attention mechanism used in the GPT‑2
-  architecture.  It projects the input into query, key and value
-  representations, applies a causal mask to prevent positions from
-  attending to future tokens, computes scaled dot‑product attention
-  weights and applies a final linear projection.  All dropout
-  behaviour is controlled by the surrounding transformer block.
-
-  Attributes
-  ----------
-  config:
-      A :class:`ModelConfig` specifying model hyperparameters.
-  dtype:
-      The data type of the internal parameters and computation.  By
-      default this is ``jnp.float32``.
-  """
+  """Multi-head causal self-attention."""
 
   config: ModelConfig
   dtype: jnp.dtype = jnp.float32
@@ -92,26 +30,12 @@ class CausalSelfAttention(nn.Module):
   def __call__(
     self, x: jnp.ndarray, mask: Optional[jnp.ndarray], deterministic: bool = True
   ) -> jnp.ndarray:
-    """Apply masked multi‑head attention to the inputs.
+    """Apply attention.
 
-    Parameters
-    ----------
-    x:
-        Input tensor of shape ``(batch, seq_length, n_embd)``.
-    mask:
-        Boolean array of shape ``(1, 1, seq_length, seq_length)``
-        indicating which positions are allowed to attend to which.
-        ``True`` values indicate that attention is allowed.  If
-        ``None``, no masking is applied (not recommended for GPT‑2).
-    deterministic:
-        Whether to disable dropout and mask sampling.  During
-        inference this should be set to ``True``.
-
-    Returns
-    -------
-    jnp.ndarray
-        A tensor of shape ``(batch, seq_length, n_embd)`` containing
-        the result of the attention operation.
+    Args:
+      x: (batch, seq, n_embd)
+      mask: (1, 1, seq, seq) where True allows attention
+      deterministic: disables dropout when True
     """
     cfg = self.config
     bsz, seq_len, _ = x.shape
@@ -173,14 +97,7 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-  """Feed‑forward network used inside each transformer block.
-
-  The network consists of two fully connected layers with an
-  activation in between.  The size of the intermediate layer is
-  determined by ``config.n_inner``; if it is ``None`` the size
-  defaults to ``4 * n_embd``.  Dropout is applied after the output
-  projection.
-  """
+  """Two-layer feed-forward network used in each block."""
 
   config: ModelConfig
   dtype: jnp.dtype = jnp.float32
@@ -200,15 +117,7 @@ class MLP(nn.Module):
 
 
 class GPT2Block(nn.Module):
-  """Single transformer block comprising attention and feed‑forward layers.
-
-  Each block normalises its input, applies causal self‑attention,
-  adds the result back to the residual and then applies another
-  normalisation followed by an MLP.  The MLP output is also added
-  back to the residual.  Dropout is applied inside the attention
-  module and MLP.  Layer normalisation uses ``layer_norm_epsilon``
-  from the configuration.
-  """
+  """Transformer block: LN → attn → residual → LN → MLP → residual."""
 
   config: ModelConfig
   dtype: jnp.dtype = jnp.float32
@@ -235,14 +144,7 @@ class GPT2Block(nn.Module):
 
 
 class GPT2LMHeadModel(nn.Module):
-  """Full GPT‑2 model with a tied language modelling head.
-
-  This class encapsulates the complete GPT‑2 architecture including
-  token and positional embeddings, a stack of transformer blocks and
-  the output projection tied to the input embeddings.  It exposes a
-  forward method that returns logits over the vocabulary for each
-  position in the input sequence.
-  """
+  """GPT-2 language model with tied input/output embeddings."""
 
   config: ModelConfig
   dtype: jnp.dtype = jnp.float32
@@ -286,24 +188,7 @@ class GPT2LMHeadModel(nn.Module):
     self.embd_dropout = nn.Dropout(rate=self.config.embd_pdrop)
 
   def __call__(self, input_ids: jnp.ndarray, deterministic: bool = True) -> jnp.ndarray:
-    """Forward pass through the model.
-
-    Parameters
-    ----------
-    input_ids:
-        A batch of token ids of shape ``(batch, seq_length)``.  The
-        values must be integers in the range ``[0, vocab_size)`.
-    deterministic:
-        Whether to disable dropout.  This should be set to ``True``
-        for inference.
-
-    Returns
-    -------
-    jnp.ndarray
-        Logits of shape ``(batch, seq_length, vocab_size)``.  The
-        logits are untied from any softmax; applying a softmax
-        externally converts the logits into probabilities.
-    """
+    """Compute logits over the vocabulary for each input position."""
     batch_size, seq_len = input_ids.shape
     # Lookup token and position embeddings.  Positional indices are
     # computed on the fly.

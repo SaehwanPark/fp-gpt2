@@ -1,25 +1,4 @@
-"""Inference script for the GPT‑2 Flax model.
-
-This script shows how to generate text using the custom GPT‑2
-implementation.  It supports loading parameters either from a
-fine‑tuned checkpoint (produced by :mod:`src.train`) or directly
-from a Hugging Face pre‑trained model.  The tokenizer is obtained
-from Hugging Face to ensure proper encoding and decoding of text.
-
-Usage
------
-
-The following example loads the pre‑trained GPT‑2 weights, prompts
-the model with a short phrase and generates an additional 20 tokens:
-
-.. code:: bash
-
-    python -m src.inference --prompt "Hello, I'm a language model," --max-length 20
-
-If you have fine‑tuned the model and saved a checkpoint with
-:mod:`src.train`, you can load those parameters instead by passing
-``--checkpoint path_to_file.npz``.
-"""
+"""Run text generation with the custom GPT-2 Flax model."""
 
 from __future__ import annotations
 
@@ -79,31 +58,7 @@ def generate_text(
   prompt: str,
   max_length: int,
 ) -> str:
-  """Generate tokens from the model given a prompt.
-
-  Tokens are generated one by one using greedy decoding.  For each
-  step the entire sequence is re‑evaluated; this is inefficient but
-  simple and sufficient for demonstration purposes.  For more
-  efficient decoding you could add a cache to the model.
-
-  Parameters
-  ----------
-  model:
-      The GPT‑2 Flax model to use for generation.
-  params:
-      Parameter dictionary for the model.
-  tokenizer:
-      A Hugging Face tokenizer matching the model.
-  prompt:
-      The initial text to feed into the model.
-  max_length:
-      The maximum number of tokens (including prompt) to generate.
-
-  Returns
-  -------
-  str
-      The decoded text consisting of the prompt and generated tokens.
-  """
+  """Greedy decode up to ``max_length`` tokens (including prompt)."""
   # Encode the prompt into token ids.
   input_ids = tokenizer.encode(prompt)
   input_ids = list(input_ids)

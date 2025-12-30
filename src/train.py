@@ -1,35 +1,4 @@
-"""Example script for fine‑tuning the GPT‑2 model with JAX/Flax.
-
-This script demonstrates how to perform a basic fine‑tuning of the
-custom GPT‑2 model on a user‑provided text corpus.  The goal is
-educational rather than to achieve state‑of‑the‑art performance.  It
-illustrates data loading, tokenisation, loss computation, gradient
-updates with Optax and model parameter saving.  The training loop
-adheres to functional programming principles: immutable state is
-passed between steps and side effects are confined to logging and
-checkpoint writing.
-
-Prior to running this script you must set a ``DATA_DIR`` environment
-variable pointing at the directory containing your training text file.
-You can specify the file name via the ``--dataset`` argument.  The
-Hugging Face tokenizer for the model specified in ``--model-name``
-will be used to encode the text.
-
-Examples
---------
-
-The following command fine‑tunes the model on a file called
-``train.txt`` located in ``DATA_DIR`` for 10 steps with a batch size
-of 2 and a sequence length of 64 tokens:
-
-.. code:: bash
-
-    DATA_DIR=/path/to/data python -m src.train --dataset train.txt \
-      --model-name gpt2 --batch-size 2 --seq-length 64 --steps 10
-
-This example prints the loss at each step and writes a final
-checkpoint to the working directory.
-"""
+"""Minimal fine-tuning loop for the custom GPT-2 Flax model."""
 
 from __future__ import annotations
 
@@ -54,20 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def cross_entropy_loss(logits: jnp.ndarray, targets: jnp.ndarray) -> jnp.ndarray:
-  """Compute the cross‑entropy loss between logits and targets.
-
-  Parameters
-  ----------
-  logits:
-      Logits output by the model of shape ``(batch, seq_len, vocab_size)``.
-  targets:
-      Target token ids of shape ``(batch, seq_len)``.
-
-  Returns
-  -------
-  jnp.ndarray
-      The mean cross‑entropy loss over the batch and sequence.
-  """
+  """Mean cross-entropy over batch and sequence."""
   vocab_size = logits.shape[-1]
   one_hot_targets = jax.nn.one_hot(targets, num_classes=vocab_size)
   log_probs = jax.nn.log_softmax(logits, axis=-1)
@@ -76,38 +32,14 @@ def cross_entropy_loss(logits: jnp.ndarray, targets: jnp.ndarray) -> jnp.ndarray
 
 
 def create_learning_rate_fn(learning_rate: float) -> optax.Schedule:
-  """Create a constant learning rate schedule.
-
-  In a real project you might use warm‑up and decay.  Here we use a
-  constant schedule for simplicity.
-  """
+  """Constant learning-rate schedule."""
   return optax.constant_schedule(learning_rate)
 
 
 def train_step(
   state: train_state.TrainState, batch_inputs: jnp.ndarray, batch_targets: jnp.ndarray
 ) -> Tuple[train_state.TrainState, jnp.ndarray]:
-  """Perform a single optimisation step.
-
-  A JAX transformation will jit‑compile this function so that it runs
-  efficiently on accelerators.  It returns the updated training state
-  and the computed loss for logging.
-
-  Parameters
-  ----------
-  state:
-      Current training state containing parameters and optimiser.
-  batch_inputs:
-      Input token ids of shape ``(batch, seq_len)``.
-  batch_targets:
-      Target token ids.  For language modelling this is typically the
-      same as ``batch_inputs`` shifted by one position.
-
-  Returns
-  -------
-  Tuple[train_state.TrainState, jnp.ndarray]
-      Updated state and the loss for the batch.
-  """
+  """One optimization step (forward → loss → grad → update)."""
 
   def loss_fn(params: Any) -> jnp.ndarray:
     logits = state.apply_fn({"params": params}, batch_inputs, deterministic=False)
@@ -122,28 +54,7 @@ def train_step(
 def iterate_batches(
   token_ids: np.ndarray, batch_size: int, seq_length: int
 ) -> Iterable[Tuple[np.ndarray, np.ndarray]]:
-  """Generate batches of inputs and targets from a stream of token ids.
-
-  The generator yields tuples of arrays with shapes
-  ``(batch_size, seq_length)``.  Each input sequence is accompanied by
-  a target sequence which is the input shifted one token to the
-  left.  When the end of the token stream is reached the iterator
-  wraps around.
-
-  Parameters
-  ----------
-  token_ids:
-      A one‑dimensional array of encoded token ids.
-  batch_size:
-      Number of sequences per batch.
-  seq_length:
-      Length of each sequence in tokens.
-
-  Yields
-  ------
-  tuple of ndarray
-      A pair ``(inputs, targets)`` representing a batch.
-  """
+  """Yield infinite (inputs, targets) batches from a token-id stream."""
   data_len = len(token_ids)
   # Starting offset for reading sequences; this will advance
   # sequentially through the corpus.

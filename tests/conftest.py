@@ -1,13 +1,4 @@
-"""pytest configuration to ensure the project source code can be imported.
-
-This file adjusts the Python path at runtime so that the `src` package in the
-repository root is discoverable when running tests.  Without this adjustment,
-invoking pytest from the project root would not add the root itself to
-``sys.path``, leading to ``ModuleNotFoundError`` when importing modules from
-``src``.  By inserting the repository root at the front of ``sys.path`` we
-ensure that imports such as ``from src.config import ModelConfig`` resolve
-correctly.
-"""
+"""pytest config: ensure repo root is on sys.path for importing ``src``."""
 
 from __future__ import annotations
 

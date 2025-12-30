@@ -1,4 +1,4 @@
-"""Model configuration for the GPT-2 Flax modules."""
+"""model configuration for the gpt-2 flax modules."""
 
 from __future__ import annotations
 
@@ -8,7 +8,11 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class ModelConfig:
-  """GPT-2 hyperparameters used to instantiate the Flax model."""
+  """gpt-2 hyperparameters used to instantiate the flax model.
+
+  immutable configuration ensures no accidental mutation during training.
+  all derived properties (like head_dim) are computed on demand.
+  """
 
   vocab_size: int
   n_positions: int
@@ -23,16 +27,21 @@ class ModelConfig:
 
   @property
   def head_dim(self) -> int:
-    """Per-head hidden size."""
+    """per-head hidden size (d_k in attention is all you need)."""
     return self.n_embd // self.n_head
+
+  @property
+  def ffn_dim(self) -> int:
+    """feedforward inner dimension (default 4x embedding)."""
+    return self.n_inner if self.n_inner is not None else 4 * self.n_embd
 
 
 def load_hf_gpt2_config(hf_config) -> ModelConfig:
-  """Build ``ModelConfig`` from a Hugging Face ``GPT2Config``."""
-  # Import inside the function to avoid a hard dependency when the
-  # transformers package is not installed.  Importing at module
-  # import time would raise an ImportError for users who only work
-  # with the bare model implementation.
+  """build ``ModelConfig`` from a hugging face ``GPT2Config``.
+
+  delayed import avoids hard dependency on transformers for users
+  who only need the bare model implementation.
+  """
   from transformers import GPT2Config as _GPT2Config  # type: ignore
 
   if not isinstance(hf_config, _GPT2Config):
